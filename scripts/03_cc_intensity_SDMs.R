@@ -3,12 +3,17 @@ library(tidyverse)
 library(terra)
 library(sf)
 library(bcmaps)
+library(gbm3)
+library(maxnet)
 
 # set paths and mkdir
 
 clean_dir <- here::here("data", "gbif_noram")
 cellcount_dir <- here::here("data", "cellcounts")
 fs::dir_create(cellcount_dir)
+
+species_list <- here::here("data", "bc_species", "species_list.rds") %>%
+  read_rds()
 
 c_files <- fs::dir_ls(clean_dir, recurse = TRUE, type = "file")
 
@@ -128,7 +133,13 @@ covariates <- c(bioclim, l1p_smooth_r)
 
 set.seed(42)
 
-psabs <- spatSample(covariates, 10000, values = FALSE, na.rm = TRUE, cells = TRUE) %>%
+psabs <- spatSample(
+  covariates,
+  10000,
+  values = FALSE,
+  na.rm = TRUE,
+  cells = TRUE
+) %>%
   as.numeric()
 
 psabs_tib <- tibble(
@@ -138,7 +149,13 @@ psabs_tib <- tibble(
 )
 
 
-run_sdm <- function(spec, cellcounts, covariates, psabs_tib, n_presence = 5000) {
+run_sdm <- function(
+  spec,
+  cellcounts,
+  covariates,
+  psabs_tib,
+  n_presence = 5000
+) {
   spec_df <- cellcounts %>%
     filter(species == spec) %>%
     collect()
@@ -150,7 +167,8 @@ run_sdm <- function(spec, cellcounts, covariates, psabs_tib, n_presence = 5000) 
 
   spec_psab <- spec_df %>%
     slice_sample(n = min(n_presence, nrow(spec_df))) %>%
-    bind_rows(psabs_tib)
+    bind_rows(psabs_tib) %>%
+    ungroup()
 
   coords <- xyFromCell(covariates, spec_psab$cell)
 
@@ -168,15 +186,58 @@ run_sdm <- function(spec, cellcounts, covariates, psabs_tib, n_presence = 5000) 
     drop_na()
 
   if (n_distinct(for_model$pa) < 2) {
-    message(glue::glue("Skipping {spec}: presence/absence not both present after NA drop."))
+    message(glue::glue(
+      "Skipping {spec}: presence/absence not both present after NA drop."
+    ))
     return(NULL)
   }
+  # # testing glm
+  # model <- gbm::gbm(pa ~ ., data = for_model, family = binomial())
 
-  model <- glm(pa ~ ., data = for_model, family = binomial())
+  # # maxent
+
+  model <- maxnet(
+    p = for_model$pa,
+    data = for_model %>% select(-pa)
+  )
+
+  # # brt
+  train_params <- training_params(
+    num_trees = 2000,
+    shrinkage = 0.01,
+    interaction_depth = 3,
+    bag_fraction = 0.5,
+    num_train = round(0.8 * nrow(for_model)), # or nrow() for no held-out split
+    min_num_obs_in_node = 10
+  )
+
+  model <- gbmt(
+    pa ~ .,
+    data = for_model,
+    distribution = gbm_dist("Bernoulli"),
+    train_params = train_params,
+    cv_folds = 5,
+    is_verbose = FALSE
+  )
+
+  best_iter <- gbmt_performance(model, method = "cv")
 
   pred_covariates <- covariates
-  pred_covariates[["sample_intensity"]] <- max(pa$sample_intensity, na.rm = TRUE)
+  pred_covariates[["sample_intensity"]] <- max(
+    pa$sample_intensity,
+    na.rm = TRUE
+  )
 
+  prediction <- predict(
+    pred_covariates,
+    model,
+    n.trees = best_iter,
+    type = "response"
+  )
+
+  # for maxent
+  prediction <- predict(pred_covariates, model, type = "cloglog", na.rm = T)
+  # for uhhhhh glm
   prediction <- predict(pred_covariates, model, type = "response")
 
   list(species = spec, model = model, prediction = prediction, pa = pa)
