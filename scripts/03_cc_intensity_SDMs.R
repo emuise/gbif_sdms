@@ -1,10 +1,14 @@
 library(arrow)
 library(tidyverse)
 library(terra)
+library(tidyterra)
 library(sf)
 library(bcmaps)
 library(gbm3)
 library(maxnet)
+library(viridis)
+library(taxize)
+muiselib2::muiselib_setup()
 
 # set paths and mkdir
 
@@ -103,6 +107,26 @@ plot(
   main = "log(mean sampling intensity) (30 km focal window)"
 )
 
+ggplot() +
+  geom_spatraster(data = l1p_smooth_r) +
+  scale_fill_viridis_c(
+    na.value = NA,
+    limits = c(0, minmax(l1p_smooth_r)[2]),
+    breaks = c(0, minmax(l1p_smooth_r)[2]),
+    labels = c("Low", "High")
+  ) +
+  labs(title = "log(mean sampling intensity + 1) (30 km focal window)",
+fill = NULL) +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.1, 0.2),
+    panel.grid = element_line(colour = "grey70"),
+    panel.background = element_rect(fill = "grey90"),
+    legend.background = element_rect(fill = "grey90", colour = "grey70")
+  )
+
+ggsave("sampling_intensity.png")
+
 bc_smooth <- smooth_r %>%
   crop(
     bcb %>%
@@ -192,35 +216,35 @@ run_sdm <- function(
     return(NULL)
   }
   # # testing glm
-  # model <- gbm::gbm(pa ~ ., data = for_model, family = binomial())
+  model <- glm(pa ~ ., data = for_model, family = binomial())
 
   # # maxent
 
-  model <- maxnet(
-    p = for_model$pa,
-    data = for_model %>% select(-pa)
-  )
+  # model <- maxnet(
+  #   p = for_model$pa,
+  #   data = for_model %>% select(-pa)
+  # )
 
   # # brt
-  train_params <- training_params(
-    num_trees = 2000,
-    shrinkage = 0.01,
-    interaction_depth = 3,
-    bag_fraction = 0.5,
-    num_train = round(0.8 * nrow(for_model)), # or nrow() for no held-out split
-    min_num_obs_in_node = 10
-  )
+  # train_params <- training_params(
+  #   num_trees = 2000,
+  #   shrinkage = 0.01,
+  #   interaction_depth = 3,
+  #   bag_fraction = 0.5,
+  #   num_train = round(0.8 * nrow(for_model)), # or nrow() for no held-out split
+  #   min_num_obs_in_node = 10
+  # )
 
-  model <- gbmt(
-    pa ~ .,
-    data = for_model,
-    distribution = gbm_dist("Bernoulli"),
-    train_params = train_params,
-    cv_folds = 5,
-    is_verbose = FALSE
-  )
+  # model <- gbmt(
+  #   pa ~ .,
+  #   data = for_model,
+  #   distribution = gbm_dist("Bernoulli"),
+  #   train_params = train_params,
+  #   cv_folds = 5,
+  #   is_verbose = FALSE
+  # )
 
-  best_iter <- gbmt_performance(model, method = "cv")
+  # best_iter <- gbmt_performance(model, method = "cv")
 
   pred_covariates <- covariates
   pred_covariates[["sample_intensity"]] <- max(
@@ -228,15 +252,15 @@ run_sdm <- function(
     na.rm = TRUE
   )
 
-  prediction <- predict(
-    pred_covariates,
-    model,
-    n.trees = best_iter,
-    type = "response"
-  )
+  # prediction <- predict(
+  #   pred_covariates,
+  #   model,
+  #   n.trees = best_iter,
+  #   type = "response"
+  # )
 
   # for maxent
-  prediction <- predict(pred_covariates, model, type = "cloglog", na.rm = T)
+  # prediction <- predict(pred_covariates, model, type = "cloglog", na.rm = T)
   # for uhhhhh glm
   prediction <- predict(pred_covariates, model, type = "response")
 
@@ -247,7 +271,7 @@ run_sdm <- function(
 # Example: single species (matches original script's demo)
 # ---------------------------------------------------------------------------
 
-spec <- "Gulo gulo"
+spec <- "Phrynosoma douglasii"
 result <- run_sdm(spec, cc, covariates, psabs_tib)
 
 if (!is.null(result)) {
@@ -259,3 +283,79 @@ if (!is.null(result)) {
     add = TRUE
   )
 }
+
+suit_vect <- result$pa %>%
+  mutate(result$prediction[cell]) %>%
+  vect(geom = c("x", "y"), crs = result$prediction)
+
+
+ggplot() +
+  geom_spatraster(data = result$prediction) +
+  geom_spatvector(
+    data = suit_vect %>%
+      filter(n > 0),
+    aes(fill = lyr1),
+    shape = 21
+  ) +
+  scale_fill_viridis_c(
+    na.value = NA,
+    limits = c(0, 1),
+    breaks = c(0, 1),
+    labels = c("Low", "High")
+  ) +
+
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.1, 0.2),
+    panel.grid = element_line(colour = "grey70"),
+    panel.background = element_rect(fill = "grey90"),
+    legend.background = element_rect(fill = "grey90", colour = "grey70")
+  ) +
+  labs(title = result$species, fill = "Suitability")
+
+ggsave("wolv_suit.png", height = 5, width = 5, dpi = 600)
+
+ambi <- 2 * abs(result$prediction - 0.5)
+
+ambi_vect <- result$pa %>%
+  mutate(ambi[cell]) %>%
+  vect(geom = c("x", "y"), crs = result$prediction)
+
+ggplot() +
+  geom_spatraster(data = ambi) +
+  geom_spatvector(
+    data = ambi_vect %>%
+      filter(n > 0),
+    aes(fill = lyr1),
+    shape = 21
+  ) +
+  scale_fill_viridis_c(
+    na.value = NA,
+    limits = c(0, 1),
+    breaks = c(0, 1),
+    labels = c("High", "Low")
+  ) +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.1, 0.2),
+    panel.grid = element_line(colour = "grey70"),
+    panel.background = element_rect(fill = "grey90"),
+    legend.background = element_rect(fill = "grey90", colour = "grey70")
+  ) +
+  labs(title = "Gulo gulo", fill = "Ambiguity")
+
+ggsave("wolv_amb.png", height = 5, width = 5, dpi = 600)
+
+
+bind_rows(
+  ambi_vect %>% as_tibble() %>% mutate(name = "ambiguity"),
+  suit_vect %>% as_tibble() %>% mutate(name = "suitability")
+) %>%
+  ggplot() +
+  geom_density(aes(x = lyr1, fill = species), alpha = 0.5) + 
+  facet_wrap(~fct_rev(name), ncol = 1) +
+  theme(legend.position = "bottom") +
+  labs(x = NULL,
+  fill = NULL)
+
+ggsave("suit-ambi.png", height = 6, width = 4, dpi = 600)
