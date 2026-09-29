@@ -58,7 +58,7 @@ download_unzip_bucket(
   "https://s3-us-west-2.amazonaws.com/www.cacpd.org/CMIP6v73/normals/Normal_1991_2020_bioclim.zip"
 )
 download_unzip_bucket(
-  "https://s3-us-west-2.amazonaws.com/www.cacpd.org/CMIP6v73/ensembles/ensemble_8GCMs_ssp585_2071_2100_bioclim.zip"
+  "https://s3-us-west-2.amazonaws.com/www.cacpd.org/CMIP6v73/ensembles/ensemble_13GCMs_ssp585_2081_2100_bioclim.zip"
 )
 
 
