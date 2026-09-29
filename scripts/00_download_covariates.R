@@ -15,7 +15,7 @@ mc_alias_set(
 )
 
 covariate_path <- here::here("data", "covariates")
-dir.create(dirname(covariate_path))
+fs::dir_create(dirname(covariate_path))
 
 # climate
 
@@ -138,7 +138,7 @@ glue::glue(
 
 # IUCN range maps
 # manually download from https://www.iucnredlist.org/resources/spatial-data-download
-# unzip into here::here("data", "covariates", "iucn")
+# unzip into here::here("data", "covariates", "iucn", "raw")
 # then run this section
 
 iucn_loc <- here::here("data", "covariates", "iucn")
