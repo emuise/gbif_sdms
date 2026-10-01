@@ -181,7 +181,7 @@ download_elev <- function() {
     return(fs::dir_ls(elev_dir))
   }
   fs::dir_create(elev_dir)
-  elev <- geodata::elevation_global(0.5, "scatch")
+  elev <- geodata::elevation_global(0.5, "scratch")
 
   elev_snap_loc <- here::here("scratch", "snap_elev.tif")
 
@@ -244,3 +244,31 @@ download_elev <- function() {
 }
 
 download_elev()
+
+
+# soils
+# data had to be downloaded and unzipped from here
+# https://www.earthdata.nasa.gov/data/catalog/ornl-cloud-nacp-mstmip-unified-na-soilmap-1242-1
+# there is a way to do it programmatically but involves a bit of painful authentication
+# unzip into here::here("data", "covariates", "soil", "raw")
+
+soil_loc <- here::here(covariate_path, "soil")
+
+soil_vars <- c("Subsoil_pH", "Topsoil_Organic_Carbon", "Topsoil_Silt_Fraction")
+all_sfiles <- fs::dir_ls(here::here(soil_loc, "raw"), regexp = ".tif$", recurse = T)
+
+subset_soils <- map(soil_vars, \(x) {
+  savename <- here::here(soil_loc, glue::glue("{x}.tif"))
+  if(file.exists(savename)) {
+    return(savename)
+  }
+  print(x)
+  r <- str_subset(all_sfiles, x) %>%
+    rast() %>%
+    project(snap, method = "near")
+
+  names(r) <- x
+  writeRaster(r, savename)
+  return(savename)
+}, .progress = T)
+
