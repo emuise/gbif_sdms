@@ -19,6 +19,11 @@ fs::dir_create(cellcount_dir)
 species_list <- here::here("data", "bc_species", "species_list.rds") %>%
   read_rds()
 
+taxa_join <- here::here("data", "spatial_counts") %>%
+  arrow::open_dataset() %>%
+  distinct(kingdom, phylum, class, order, family, genus, species) %>%
+  collect()
+
 c_files <- fs::dir_ls(clean_dir, recurse = TRUE, type = "file")
 
 bcb <- bcmaps::bc_bound_hres() %>%
@@ -26,7 +31,7 @@ bcb <- bcmaps::bc_bound_hres() %>%
 
 # this is downloaded in 00
 # i have double checked that all climate layers use the same mask
-bioclim_fold <- here::here("data", "climate", "Normal_1991_2020_bioclim")
+bioclim_fold <- here::here("data", "covariates", "Normal_1991_2020_bioclim")
 
 snap <- bioclim_fold %>%
   fs::dir_ls(type = "file") %>%
@@ -86,9 +91,22 @@ cellcounts <- cc %>%
   group_by(species, cell) %>%
   summarise(n = sum(n))
 
-sample_intensity <- cc %>%
-  group_by(cell) %>%
-  summarize(n = sum(n)) %>%
+# define the species list first so it is quicker, example mammals
+all_species <- taxa_join %>%
+  pull(species)
+
+mammals <- taxa_join %>%
+  filter(class == "Mammalia") %>%
+  pull(species)
+
+calc_group_intensity <- function(spec_list) {
+  cc %>%
+    filter(species %in% spec_list) %>%
+    group_by(cell) %>%
+    summarize(n = sum(n))
+}
+
+sample_intensity <- calc_group_intensity(all_species) %>%
   collect()
 
 r <- snap
@@ -96,8 +114,8 @@ values(r) <- NA
 
 r[!is.nan(snap_vals)] <- 0
 r[sample_intensity$cell] <- sample_intensity$n
-
-smooth_r <- focal(r, w = 15, fun = "mean", na.rm = TRUE, na.policy = "omit")
+# w = 31 is a 30 km circle around the centre
+smooth_r <- focal(r, w = 31, fun = "mean", na.rm = TRUE, na.policy = "omit")
 names(smooth_r) <- "sample_intensity"
 
 l1p_smooth_r <- log1p(smooth_r)
@@ -115,8 +133,10 @@ ggplot() +
     breaks = c(0, minmax(l1p_smooth_r)[2]),
     labels = c("Low", "High")
   ) +
-  labs(title = "log(mean sampling intensity + 1) (30 km focal window)",
-fill = NULL) +
+  labs(
+    title = "log(mean sampling intensity + 1) (30 km focal window)",
+    fill = NULL
+  ) +
   theme(
     legend.position = "inside",
     legend.position.inside = c(0.1, 0.2),
@@ -267,6 +287,88 @@ run_sdm <- function(
   list(species = spec, model = model, prediction = prediction, pa = pa)
 }
 
+spec_list <- mammals
+
+bc_cells <- rasterize(bcb %>% project(smooth_r), smooth_r) %>%
+  cells()
+
+species_accumulation_curve <- function(spec_list) {
+  subset_counts <- cellcounts %>%
+    filter(species %in% spec_list) %>%
+    filter(cell %in% bc_cells) %>%
+    collect() %>%
+    ungroup()
+
+  # --- Chao2 ---
+  incidence <- subset_counts %>%
+    distinct(species, cell) %>%
+    count(species, name = "n_i")
+
+  Q1 <- sum(incidence$n_i == 1)
+  Q2 <- sum(incidence$n_i == 2)
+  S_obs <- nrow(incidence)
+
+  chao2 <- S_obs + (Q1 * (Q1 - 1)) / (2 * (Q2 + 1))
+
+  # --- accumulation curve (unchanged) ---
+  iters <- map_dfr(1:100, \(x) {
+    slice_sample(subset_counts, prop = 1) %>%
+      mutate(
+        is_new = !duplicated(species),
+        cum_species = cumsum(is_new),
+        cum_records = row_number(),
+        cum_n = cumsum(n)
+      ) %>%
+      select(starts_with("cum")) %>%
+      mutate(x)
+  }, .progress = T)
+
+  smry_iters <- iters %>%
+    group_by(cum_records) %>%
+    summarize(
+      mean_richness = mean(cum_species),
+      sd_richness = sd(cum_species),
+      lower_ci = mean_richness - 1.96 * sd_richness,
+      upper_ci = mean_richness + 1.96 * sd_richness
+    )
+
+  p <- ggplot(smry_iters, aes(x = cum_records, y = mean_richness)) +
+    geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci), alpha = 0.5) +
+    geom_line() +
+    geom_hline(yintercept = chao2, linetype = "dashed", color = "firebrick") +
+    geom_hline(yintercept = S_obs, linetype = "dotted", color = "grey40") +
+    annotate(
+      "text",
+      x = max(smry_iters$cum_records), y = chao2,
+      label = glue::glue("Chao2 \u2248 {round(chao2, 1)}"),
+      hjust = 1, vjust = -0.5, color = "firebrick", size = 3
+    ) +
+    labs(
+      x = "Cumulative records",
+      y = "Species richness",
+      caption = glue::glue(
+        "S_obs = {S_obs}  |  Chao2 = {round(chao2, 1)}  |  ",
+        "Est. undetected = {round(chao2 - S_obs, 1)}  |  ",
+        "Q1 = {Q1}, Q2 = {Q2}"
+      )
+    )
+  
+  p
+
+  list(
+    plot = p,
+    summary = smry_iters,
+    chao2 = chao2,
+    S_obs = S_obs,
+    Q1 = Q1,
+    Q2 = Q2,
+    incidence = incidence
+  )
+}
+
+egg <- species_accumulation_curve(taxa_join %>% filter(class == "Aves") %>% pull(species))
+
+
 # ---------------------------------------------------------------------------
 # Example: single species (matches original script's demo)
 # ---------------------------------------------------------------------------
@@ -352,10 +454,9 @@ bind_rows(
   suit_vect %>% as_tibble() %>% mutate(name = "suitability")
 ) %>%
   ggplot() +
-  geom_density(aes(x = lyr1, fill = species), alpha = 0.5) + 
-  facet_wrap(~fct_rev(name), ncol = 1) +
+  geom_density(aes(x = lyr1, fill = species), alpha = 0.5) +
+  facet_wrap(~ fct_rev(name), ncol = 1) +
   theme(legend.position = "bottom") +
-  labs(x = NULL,
-  fill = NULL)
+  labs(x = NULL, fill = NULL)
 
 ggsave("suit-ambi.png", height = 6, width = 4, dpi = 600)
