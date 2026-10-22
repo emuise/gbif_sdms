@@ -1,33 +1,31 @@
 library(tidyverse)
-library(minioclient)
 library(terra)
 library(curl)
 library(whitebox)
 whitebox::install_whitebox()
 
-# one-time setup (safe to re-run - config persists in minioclient's config dir)
-install_mc()
-mc_alias_set(
-  "aw",
-  endpoint = "s3-us-west-2.amazonaws.com",
-  access_key = "",
-  secret_key = ""
-)
-
 covariate_path <- here::here("data", "covariates")
 fs::dir_create(dirname(covariate_path))
+
+fs::dir_create(here::here("scratch"))
 
 # climate
 
 download_unzip_bucket <- function(aw_url) {
-  aw_mc_path <- file.path("aw", sub("^https?://[^/]+/", "", aw_url))
-
   aw_zip_path <- here::here(covariate_path, basename(aw_url))
   fs::dir_create(dirname(aw_zip_path))
 
   if (!file.exists(aw_zip_path)) {
-    message(glue::glue("Syncing {basename(aw_url)} via mc..."))
-    mc_cp(aw_mc_path, aw_zip_path)
+    message(glue::glue("Downloading {basename(aw_url)}..."))
+    part_path <- paste0(aw_zip_path, ".part")
+    res <- curl::multi_download(
+      aw_url,
+      destfile = part_path,
+      resume = TRUE,
+      progress = TRUE
+    )
+    stopifnot(res$success, res$status_code %in% c(200, 206))
+    file.rename(part_path, aw_zip_path)
   } else {
     message(glue::glue("{basename(aw_url)} already downloaded. Skipping."))
   }
@@ -98,11 +96,12 @@ hfi_download <- function(url) {
     stopifnot(res$success, res$status_code %in% c(200, 206))
   }
   hfi <- rast(scratchfile)
-  message("Downloaded")
+  message("Downloaded HFI")
 
   snap_proj_file <- here::here("scratch", "snap_hfi.tif")
 
   if (!file.exists(snap_proj_file)) {
+    message("Making projected snap file and saving")
     ply <- snap_poly %>%
       project(hfi)
 
@@ -135,40 +134,6 @@ glue::glue(
   "https://storage.googleapis.com/hii-export/{c(2015:2020)}-01-01/hii_{c(2015:2020)}-01-01.tif"
 ) %>%
   map(hfi_download)
-
-# IUCN range maps
-# manually download from https://www.iucnredlist.org/resources/spatial-data-download
-# unzip into here::here("data", "covariates", "iucn", "raw")
-# then run this section
-
-iucn_loc <- here::here("data", "covariates", "iucn")
-
-iucn_folds <- fs::dir_ls(here::here(iucn_loc, "raw"))
-
-map(iucn_folds, \(fold) {
-  savename <- glue::glue(
-    here::here(iucn_loc, fold %>% basename() %>% str_to_lower()),
-    ".gpkg"
-  )
-
-  if (file.exists(savename)) {
-    return(savename)
-  }
-
-  print(basename(fold))
-
-  rangemaps <- fs::dir_ls(fold, regexp = ".shp$") %>%
-    vect()
-
-  rm_crop <- rangemaps %>%
-    crop(
-      snap_poly %>%
-        project(rangemaps)
-    ) %>%
-    project(snap_poly)
-
-  writeVector(rm_crop, savename)
-})
 
 # DEM and other derived data
 download_elev <- function() {
@@ -272,3 +237,36 @@ subset_soils <- map(soil_vars, \(x) {
   return(savename)
 }, .progress = T)
 
+# IUCN range maps
+# manually download from https://www.iucnredlist.org/resources/spatial-data-download
+# unzip into here::here("data", "covariates", "iucn", "raw")
+# then run this section
+
+iucn_loc <- here::here("data", "covariates", "iucn")
+
+iucn_folds <- fs::dir_ls(here::here(iucn_loc, "raw"))
+
+map(iucn_folds, \(fold) {
+  savename <- glue::glue(
+    here::here(iucn_loc, fold %>% basename() %>% str_to_lower()),
+    ".gpkg"
+  )
+
+  if (file.exists(savename)) {
+    return(savename)
+  }
+
+  print(basename(fold))
+
+  rangemaps <- fs::dir_ls(fold, regexp = ".shp$") %>%
+    vect()
+
+  rm_crop <- rangemaps %>%
+    crop(
+      snap_poly %>%
+        project(rangemaps)
+    ) %>%
+    project(snap_poly)
+
+  writeVector(rm_crop, savename)
+})
