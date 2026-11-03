@@ -292,12 +292,13 @@ map(iucn_folds, \(fold) {
 # land cover
 # from here https://www.cec.org/north-american-environmental-atlas/land-cover-30m-2020/
 
+# run sbatch 00a_fractional_land_cover.sh on nibi to generate fractional land cover
+# it is extremely slow locally (3 hours * 19) =~ 2.5 days
+# but clustere can process easily in parallel
+
 url <- "https://www.cec.org/files/atlas_layers/1_terrestrial_ecosystems/1_01_0_land_cover_2020_30m/land_cover_2020v2_30m_tif.zip"
 
-lc_30 <- download_unzip(url) %>%
-  rast()
-
-plot(lc_30)
+download_unzip(url)
 
 cec_classes <- c(
   "conifers",
@@ -320,7 +321,18 @@ cec_classes <- c(
   "water",
   "snow"
 )
-# ok this makes a fractional cover metric for all of the 19 classes
-lc_binary <- segregate(lc_30, classes = c(1:19))
-master_frac <- project(lc_binary, snap, method = "average")
-names(master_frac) <- cec_classes
+
+lc_paths <- here::here(
+  covariate_path,
+  "landcover",
+  glue::glue("lc_frac_{cec_classes}.tif")
+)
+
+if (!all(fs::file_exists(lc_paths))) {
+  # this basically sends the task to the cluster computer. it will NOT work to run locally
+  system2(
+    "sbatch",
+    here::here("scripts", "00a_fractional_land_cover.sh"),
+    stdout = TRUE
+  )
+}
