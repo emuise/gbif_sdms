@@ -6,58 +6,66 @@ whitebox::install_whitebox()
 
 covariate_path <- here::here("data", "covariates")
 fs::dir_create(dirname(covariate_path))
+scratch <- here::here("scratch")
+fs::dir_create(scratch)
 
-fs::dir_create(here::here("scratch"))
 
-# climate
+# this function downloads a zipped file to scratch, and then unzips it into the covariates folder
+# it only extracts rasters (tif files)
+download_unzip <- function(url) {
+  zip_path <- here::here(scratch, basename(url))
+  fs::dir_create(dirname(zip_path))
 
-download_unzip_bucket <- function(aw_url) {
-  aw_zip_path <- here::here(covariate_path, basename(aw_url))
-  fs::dir_create(dirname(aw_zip_path))
-
-  if (!file.exists(aw_zip_path)) {
-    message(glue::glue("Downloading {basename(aw_url)}..."))
-    part_path <- paste0(aw_zip_path, ".part")
+  if (!file.exists(zip_path)) {
+    message(glue::glue("Downloading {basename(url)}..."))
+    part_path <- paste0(zip_path, ".part")
     res <- curl::multi_download(
-      aw_url,
+      url,
       destfile = part_path,
       resume = TRUE,
       progress = TRUE
     )
     stopifnot(res$success, res$status_code %in% c(200, 206))
-    file.rename(part_path, aw_zip_path)
+    file.rename(part_path, zip_path)
   } else {
-    message(glue::glue("{basename(aw_url)} already downloaded. Skipping."))
+    message(glue::glue("{basename(url)} already downloaded. Skipping."))
   }
 
-  aw_uz_fold <- tools::file_path_sans_ext(aw_zip_path)
-  fs::dir_create(aw_uz_fold)
+  uz_fold <- here::here(
+    covariate_path,
+    url %>% basename() %>% tools::file_path_sans_ext()
+  )
+  fs::dir_create(uz_fold)
 
-  all_names <- utils::unzip(aw_zip_path, list = TRUE)$Name
+  all_names <- utils::unzip(zip_path, list = TRUE)$Name
   tif_files <- grep("\\.tif$", all_names, value = TRUE)
 
-  existing <- fs::dir_ls(aw_uz_fold, type = "file")
+  existing <- fs::dir_ls(uz_fold, type = "file")
   if (length(existing) >= length(tif_files) && length(tif_files) > 0) {
-    message(glue::glue("{basename(aw_uz_fold)} already extracted. Skipping."))
+    message(glue::glue("{basename(uz_fold)} already extracted. Skipping."))
   } else {
     message(glue::glue(
-      "Extracting {length(tif_files)} raster(s) to {aw_uz_fold}..."
+      "Extracting {length(tif_files)} raster(s) to {uz_fold}..."
     ))
     utils::unzip(
-      aw_zip_path,
+      zip_path,
       files = tif_files,
-      exdir = aw_uz_fold,
+      exdir = uz_fold,
       junkpaths = TRUE
     )
   }
 
-  message(glue::glue("Done: {basename(aw_url)}"))
+  message(glue::glue("Done: {basename(url)}"))
+
+  fs::dir_ls(here::here(uz_fold))
 }
+
+# climate
 # these links are from here: https://adaptwest.databasin.org/pages/adaptwest-climatena/
-download_unzip_bucket(
+download_unzip(
   "https://s3-us-west-2.amazonaws.com/www.cacpd.org/CMIP6v73/normals/Normal_1991_2020_bioclim.zip"
 )
-download_unzip_bucket(
+download_unzip(
   "https://s3-us-west-2.amazonaws.com/www.cacpd.org/CMIP6v73/ensembles/ensemble_13GCMs_ssp585_2081_2100_bioclim.zip"
 )
 
@@ -141,7 +149,7 @@ download_elev <- function() {
 
   files <- c("dem", "twi", "tri")
 
-  if(all(file.exists(here::here(elev_dir, glue::glue("{files}.tif"))))) {
+  if (all(file.exists(here::here(elev_dir, glue::glue("{files}.tif"))))) {
     message("All DEM based files already downloaded and aligned")
     return(fs::dir_ls(elev_dir))
   }
@@ -204,7 +212,9 @@ download_elev <- function() {
   }
   twi <- rast(twi_loc)
 
-  message("Downloaded and aligned elev (climateNA), calculated TRI (terra), and TWI (whiteboxtools)")
+  message(
+    "Downloaded and aligned elev (climateNA), calculated TRI (terra), and TWI (whiteboxtools)"
+  )
   return(fs::dir_ls(elev_dir))
 }
 
@@ -220,22 +230,30 @@ download_elev()
 soil_loc <- here::here(covariate_path, "soil")
 
 soil_vars <- c("Subsoil_pH", "Topsoil_Organic_Carbon", "Topsoil_Silt_Fraction")
-all_sfiles <- fs::dir_ls(here::here(soil_loc, "raw"), regexp = ".tif$", recurse = T)
+all_sfiles <- fs::dir_ls(
+  here::here(soil_loc, "raw"),
+  regexp = ".tif$",
+  recurse = T
+)
 
-subset_soils <- map(soil_vars, \(x) {
-  savename <- here::here(soil_loc, glue::glue("{x}.tif"))
-  if(file.exists(savename)) {
+subset_soils <- map(
+  soil_vars,
+  \(x) {
+    savename <- here::here(soil_loc, glue::glue("{x}.tif"))
+    if (file.exists(savename)) {
+      return(savename)
+    }
+    print(x)
+    r <- str_subset(all_sfiles, x) %>%
+      rast() %>%
+      project(snap, method = "near")
+
+    names(r) <- x
+    writeRaster(r, savename)
     return(savename)
-  }
-  print(x)
-  r <- str_subset(all_sfiles, x) %>%
-    rast() %>%
-    project(snap, method = "near")
-
-  names(r) <- x
-  writeRaster(r, savename)
-  return(savename)
-}, .progress = T)
+  },
+  .progress = T
+)
 
 # IUCN range maps
 # manually download from https://www.iucnredlist.org/resources/spatial-data-download
@@ -270,3 +288,39 @@ map(iucn_folds, \(fold) {
 
   writeVector(rm_crop, savename)
 })
+
+# land cover
+# from here https://www.cec.org/north-american-environmental-atlas/land-cover-30m-2020/
+
+url <- "https://www.cec.org/files/atlas_layers/1_terrestrial_ecosystems/1_01_0_land_cover_2020_30m/land_cover_2020v2_30m_tif.zip"
+
+lc_30 <- download_unzip(url) %>%
+  rast()
+
+plot(lc_30)
+
+cec_classes <- c(
+  "conifers",
+  "taiga",
+  "evergreen",
+  "tropical",
+  "deciduous",
+  "mixed",
+  "tropical_shrubland",
+  "temperate_shrubland",
+  "tropical_grassland",
+  "temperate_grassland",
+  "polar_shrubland",
+  "polar_grassland",
+  "polar_barren",
+  "wetland",
+  "cropland",
+  "barren",
+  "urban",
+  "water",
+  "snow"
+)
+# ok this makes a fractional cover metric for all of the 19 classes
+lc_binary <- segregate(lc_30, classes = c(1:19))
+master_frac <- project(lc_binary, snap, method = "average")
+names(master_frac) <- cec_classes
