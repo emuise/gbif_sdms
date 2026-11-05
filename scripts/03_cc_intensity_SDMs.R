@@ -12,6 +12,7 @@ muiselib2::muiselib_setup()
 
 # set paths and mkdir
 
+covariate_path <- here::here("data", "covariates")
 clean_dir <- here::here("data", "gbif_noram")
 cellcount_dir <- here::here("data", "cellcounts")
 fs::dir_create(cellcount_dir)
@@ -31,7 +32,7 @@ bcb <- bcmaps::bc_bound_hres() %>%
 
 # this is downloaded in 00
 # i have double checked that all climate layers use the same mask
-bioclim_fold <- here::here("data", "covariates", "Normal_1991_2020_bioclim")
+bioclim_fold <- here::here(covariate_path, "Normal_1991_2020_bioclim")
 
 snap <- bioclim_fold %>%
   fs::dir_ls(type = "file") %>%
@@ -92,13 +93,9 @@ cellcounts <- cc %>%
   summarise(n = sum(n))
 
 # define the species list first so it is quicker, example mammals
-all_species <- taxa_join %>%
-  pull(species)
+# sampling intensities for all species, and specific groups
 
-mammals <- taxa_join %>%
-  filter(class == "Mammalia") %>%
-  pull(species)
-
+# functions to transform a species list into intensity values
 calc_group_intensity <- function(spec_list) {
   message("calculating group intensity")
   cc %>%
@@ -128,55 +125,83 @@ smooth_intensity <- function(intensity_r, w = 31) {
   )
 }
 
-calc_smooth_intensity <- function(spec_list, w = 31) {
+pipe_save_raster <- function(
+  r,
+  path
+) {
+  names(r) <- path %>% basename() %>% tools::file_path_sans_ext()
+  writeRaster(r, path, overwrite = TRUE)
+
+  r
+}
+
+calc_smooth_intensity <- function(
+  spec_list,
+  name,
+  w = 31,
+  dir = here::here(covariate_path, "sample_intensity")
+) {
+  message("--- ", name, " ---")
+
+  fs::dir_create(dir)
+
+  raw_path <- here::here(dir, glue::glue("{name}-raw.tif"))
+  smooth_path <- here::here(dir, glue::glue("{name}-smooth_{w}.tif"))
+  smooth_l1p_path <- here::here(dir, glue::glue("{name}-smooth_{w}-l1p.tif"))
+
+  if (all(file.exists(raw_path, smooth_path, smooth_l1p_path))) {
+    message(glue::glue("{name}_w-{w} already processed"))
+    return(rast(smooth_l1p_path))
+  }
+
   calc_group_intensity(spec_list) %>%
     collect() %>%
     intensity_to_raster() %>%
-    smooth_intensity(w = w)
+    pipe_save_raster(raw_path) %>%
+    smooth_intensity(w = w) %>%
+    pipe_save_raster(smooth_path) %>%
+    log1p() %>%
+    pipe_save_raster(smooth_l1p_path)
 }
 
-smooth_r <- calc_smooth_intensity(all_species)
+all_species <- taxa_join %>%
+  pull(species)
 
-names(smooth_r) <- "sample_intensity"
+mammals <- taxa_join %>%
+  filter(class == "Mammalia") %>%
+  pull(species)
 
-l1p_smooth_r <- log1p(smooth_r)
+birds <- taxa_join %>%
+  filter(class == "Aves") %>%
+  pull(species)
 
-plot(
-  l1p_smooth_r,
-  main = "log(mean sampling intensity) (30 km focal window)"
+plants <- taxa_join %>%
+  filter(kingdom == "Plantae") %>%
+  pull(species)
+
+herps <- taxa_join %>%
+  filter(
+    class == "Reptilia" |
+      class == "Amphibia"
+  ) %>%
+  pull(species)
+
+butterflies <- taxa_join %>%
+  filter(order == "Lepidoptera") %>%
+  pull(species)
+
+iter_groups <- list(
+  "all_species" = all_species,
+  "mammals" = mammals,
+  "birds" = birds,
+  "plants" = plants,
+  "reptiles_amphibians" = herps,
+  "butterflies" = butterflies
 )
 
-ggplot() +
-  geom_spatraster(data = l1p_smooth_r) +
-  scale_fill_viridis_c(
-    na.value = NA,
-    limits = c(0, minmax(l1p_smooth_r)[2]),
-    breaks = c(0, minmax(l1p_smooth_r)[2]),
-    labels = c("Low", "High")
-  ) +
-  labs(
-    title = "log(mean sampling intensity + 1) (30 km focal window)",
-    fill = NULL
-  ) +
-  theme(
-    legend.position = "inside",
-    legend.position.inside = c(0.1, 0.2),
-    panel.grid = element_line(colour = "grey70"),
-    panel.background = element_rect(fill = "grey90"),
-    legend.background = element_rect(fill = "grey90", colour = "grey70")
-  )
-
-ggsave("sampling_intensity.png")
-
-bc_smooth <- smooth_r %>%
-  crop(
-    bcb %>%
-      project(smooth_r),
-    mask = TRUE
-  ) %>%
-  project(bcb)
-
-plot(log(bc_smooth + 1))
+imap(iter_groups, \(spp, name) {
+  calc_smooth_intensity(spp, name)
+})
 
 vars <- c(
   "MAP", # mean annual precipitation (mm)
