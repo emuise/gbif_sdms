@@ -294,7 +294,7 @@ map(iucn_folds, \(fold) {
 
 # run sbatch 00a_fractional_land_cover.sh on nibi to generate fractional land cover
 # it is extremely slow locally (3 hours * 19) =~ 2.5 days
-# but clustere can process easily in parallel
+# but cluster can process easily in parallel
 
 url <- "https://www.cec.org/files/atlas_layers/1_terrestrial_ecosystems/1_01_0_land_cover_2020_30m/land_cover_2020v2_30m_tif.zip"
 
