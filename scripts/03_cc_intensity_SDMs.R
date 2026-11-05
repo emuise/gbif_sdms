@@ -100,22 +100,43 @@ mammals <- taxa_join %>%
   pull(species)
 
 calc_group_intensity <- function(spec_list) {
+  message("calculating group intensity")
   cc %>%
     filter(species %in% spec_list) %>%
     group_by(cell) %>%
     summarize(n = sum(n))
 }
 
-sample_intensity <- calc_group_intensity(all_species) %>%
-  collect()
+intensity_to_raster <- function(intensity_df) {
+  message("rasterizing")
+  r <- snap
+  values(r) <- NA
+  r[!is.nan(snap_vals)] <- 0
+  r[intensity_df$cell] <- intensity_df$n
 
-r <- snap
-values(r) <- NA
+  r
+}
 
-r[!is.nan(snap_vals)] <- 0
-r[sample_intensity$cell] <- sample_intensity$n
-# w = 31 is a 30 km circle around the centre
-smooth_r <- focal(r, w = 31, fun = "mean", na.rm = TRUE, na.policy = "omit")
+smooth_intensity <- function(intensity_r, w = 31) {
+  message("smoothing")
+  focal(
+    intensity_r,
+    w = w,
+    fun = "mean",
+    na.rm = T,
+    na.policy = "omit"
+  )
+}
+
+calc_smooth_intensity <- function(spec_list, w = 31) {
+  calc_group_intensity(spec_list) %>%
+    collect() %>%
+    intensity_to_raster() %>%
+    smooth_intensity(w = w)
+}
+
+smooth_r <- calc_smooth_intensity(all_species)
+
 names(smooth_r) <- "sample_intensity"
 
 l1p_smooth_r <- log1p(smooth_r)
@@ -172,6 +193,8 @@ bioclim <- here::here(
   rast()
 
 names(bioclim) <- vars
+
+landcover <- here::here(data, "covariates", "landcover")
 
 covariates <- c(bioclim, l1p_smooth_r)
 
@@ -311,17 +334,21 @@ species_accumulation_curve <- function(spec_list) {
   chao2 <- S_obs + (Q1 * (Q1 - 1)) / (2 * (Q2 + 1))
 
   # --- accumulation curve (unchanged) ---
-  iters <- map_dfr(1:100, \(x) {
-    slice_sample(subset_counts, prop = 1) %>%
-      mutate(
-        is_new = !duplicated(species),
-        cum_species = cumsum(is_new),
-        cum_records = row_number(),
-        cum_n = cumsum(n)
-      ) %>%
-      select(starts_with("cum")) %>%
-      mutate(x)
-  }, .progress = T)
+  iters <- map_dfr(
+    1:100,
+    \(x) {
+      slice_sample(subset_counts, prop = 1) %>%
+        mutate(
+          is_new = !duplicated(species),
+          cum_species = cumsum(is_new),
+          cum_records = row_number(),
+          cum_n = cumsum(n)
+        ) %>%
+        select(starts_with("cum")) %>%
+        mutate(x)
+    },
+    .progress = T
+  )
 
   smry_iters <- iters %>%
     group_by(cum_records) %>%
@@ -339,9 +366,13 @@ species_accumulation_curve <- function(spec_list) {
     geom_hline(yintercept = S_obs, linetype = "dotted", color = "grey40") +
     annotate(
       "text",
-      x = max(smry_iters$cum_records), y = chao2,
+      x = max(smry_iters$cum_records),
+      y = chao2,
       label = glue::glue("Chao2 \u2248 {round(chao2, 1)}"),
-      hjust = 1, vjust = -0.5, color = "firebrick", size = 3
+      hjust = 1,
+      vjust = -0.5,
+      color = "firebrick",
+      size = 3
     ) +
     labs(
       x = "Cumulative records",
@@ -352,7 +383,7 @@ species_accumulation_curve <- function(spec_list) {
         "Q1 = {Q1}, Q2 = {Q2}"
       )
     )
-  
+
   p
 
   list(
@@ -366,7 +397,9 @@ species_accumulation_curve <- function(spec_list) {
   )
 }
 
-egg <- species_accumulation_curve(taxa_join %>% filter(class == "Aves") %>% pull(species))
+egg <- species_accumulation_curve(
+  taxa_join %>% filter(class == "Aves") %>% pull(species)
+)
 
 
 # ---------------------------------------------------------------------------
