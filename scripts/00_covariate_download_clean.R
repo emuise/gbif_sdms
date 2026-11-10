@@ -336,3 +336,41 @@ if (!all(fs::file_exists(lc_paths))) {
     stdout = TRUE
   )
 }
+
+
+
+lc_files <- here::here(covariate_path, "landcover") %>%
+  fs::dir_ls() 
+
+lc_names <- basename(lc_files) %>%
+  tools::file_path_sans_ext() %>%
+  str_remove("lc_")
+
+lc <- lc_files %>%
+  rast()
+
+names(lc) <- lc_names
+
+grassland <- subset(lc, names(lc) %>% str_detect("grassland")) %>% sum()
+names(grassland) = "grassland"
+shrubland <- subset(lc, names(lc) %>% str_detect("shrubland")) %>% sum()
+names(shrubland) = "shrubland"
+unveg <- subset(lc, names(lc) %>% str_detect("barren|snow|taiga|urban|water")) %>% sum()
+names(unveg) = "unvegetated"
+evergreen <- subset(lc, c("frac_evergreen", "frac_conifers")) %>% sum()
+names(evergreen) = "evergreen"
+cropland <- lc$frac_cropland
+names(cropland) = "cropland"
+deciduous <- lc$frac_deciduous
+names(deciduous) = "deciduous"
+mixed <- lc$frac_mixed
+names(mixed) = "mixed"
+tropical <- lc$frac_tropical
+names(tropical) = "tropical"
+
+map(list(grassland, shrubland, unveg, evergreen, cropland, deciduous, mixed, tropical), \(x){
+  print(names(x))
+  savename <- here::here(covariate_path, "landcover_input", glue::glue("{names(x)}.tif"))
+  fs::dir_create(dirname(savename))
+  writeRaster(x, savename)
+})
