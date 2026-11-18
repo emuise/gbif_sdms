@@ -371,6 +371,10 @@ names(tropical) = "tropical"
 map(list(grassland, shrubland, unveg, evergreen, cropland, deciduous, mixed, tropical), \(x){
   print(names(x))
   savename <- here::here(covariate_path, "landcover_input", glue::glue("{names(x)}.tif"))
+  if(file.exists(savename)) {
+    return(savename)
+  }
   fs::dir_create(dirname(savename))
   writeRaster(x, savename)
+  savename
 })

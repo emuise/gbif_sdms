@@ -4,11 +4,10 @@ library(terra)
 library(tidyterra)
 library(sf)
 library(bcmaps)
-library(gbm3)
-library(maxnet)
-library(viridis)
-library(taxize)
 muiselib2::muiselib_setup()
+
+# functions to get grouped intensities (uses cc, snap, snap_vals at call time)
+source(here::here("scripts", "03a_calc_group_intensity_functions.R"))
 
 # set paths and mkdir
 
@@ -19,11 +18,6 @@ fs::dir_create(cellcount_dir)
 
 species_list <- here::here("data", "bc_species", "species_list.rds") %>%
   read_rds()
-
-taxa_join <- here::here("data", "spatial_counts") %>%
-  arrow::open_dataset() %>%
-  distinct(kingdom, phylum, class, order, family, genus, species) %>%
-  collect()
 
 c_files <- fs::dir_ls(clean_dir, recurse = TRUE, type = "file")
 
@@ -54,10 +48,14 @@ walk(seq_along(c_files), \(n) {
 
   df <- open_dataset(x) %>%
     filter(
+      !is.na(species),
       (class == "Aves" & year >= 1990) |
         ((is.na(class) | class != "Aves") & year >= 1970)
     ) %>%
-    select(species, decimallatitude, decimallongitude) %>%
+    select(
+      kingdom, phylum, order, class, genus, species,
+      decimallatitude, decimallongitude
+    ) %>%
     collect()
 
   if (nrow(df) == 0) {
@@ -74,135 +72,93 @@ walk(seq_along(c_files), \(n) {
 
   df$cell <- terra::cellFromXY(snap, terra::crds(pts))
 
-  cc <- df %>%
-    filter(!is.na(cell)) %>% # this removes anything outside the raster bounds
+  df %>%
+    filter(!is.na(cell)) %>% # removes anything outside the raster bounds
     mutate(snap_val = snap_vals[cell]) %>%
-    filter(!is.na(snap_val)) %>% # this only keeps values that have matching climate values
+    filter(!is.na(snap_val)) %>% # only keeps cells with climate values
     select(-snap_val) %>%
-    count(species, cell, name = "n") %>%
+    count(kingdom, phylum, order, class, genus, species, cell, name = "n") %>%
     arrow::write_parquet(savename)
 })
 # 35 and 1494 evidently have nothing in them
 # 35 is all birds prior to 1982
 # 1494 is some plants prior to 1940
 
-cc <- arrow::open_dataset(cellcount_dir)
 
-cellcounts <- cc %>%
-  group_by(species, cell) %>%
-  summarise(n = sum(n))
+# per-phylum sorted files for fast SDM lookups
 
-# define the species list first so it is quicker, example mammals
-# sampling intensities for all species, and specific groups
+out_dir <- here::here("data", "cellcounts_by_phylum")
+fs::dir_create(out_dir)
 
-# functions to transform a species list into intensity values, 
-# saving interim rasters
-calc_group_intensity <- function(spec_list) {
-  message("calculating group intensity")
-  cc %>%
-    filter(species %in% spec_list) %>%
-    group_by(cell) %>%
-    summarize(n = sum(n))
+cc <- open_dataset(cellcount_dir)
+
+groups <- cc %>%
+  distinct(kingdom, phylum) %>%
+  collect()
+
+safe <- \(x) {
+  if (is.na(x)) "unknown" else str_replace_all(x, "[^A-Za-z0-9]", "_")
 }
 
-intensity_to_raster <- function(intensity_df) {
-  message("rasterizing")
-  r <- snap
-  values(r) <- NA
-  r[!is.nan(snap_vals)] <- 0
-  r[intensity_df$cell] <- intensity_df$n
-
-  r
-}
-
-smooth_intensity <- function(intensity_r, w = 31) {
-  message("smoothing")
-  focal(
-    intensity_r,
-    w = w,
-    fun = "mean",
-    na.rm = T,
-    na.policy = "omit"
-  )
-}
-
-pipe_save_raster <- function(
-  r,
-  path
-) {
-  names(r) <- path %>% basename() %>% tools::file_path_sans_ext()
-  writeRaster(r, path, overwrite = TRUE)
-
-  r
-}
-
-calc_smooth_intensity <- function(
-  spec_list,
-  name,
-  w = 31,
-  dir = here::here(covariate_path, "sample_intensity")
-) {
-  message("--- ", name, " ---")
-
-  fs::dir_create(dir)
-
-  raw_path <- here::here(dir, glue::glue("{name}-raw.tif"))
-  smooth_path <- here::here(dir, glue::glue("{name}-smooth_{w}.tif"))
-  smooth_l1p_path <- here::here(dir, glue::glue("{name}-smooth_{w}-l1p.tif"))
-
-  if (all(file.exists(raw_path, smooth_path, smooth_l1p_path))) {
-    message(glue::glue("{name}_w-{w} already processed"))
-    return(rast(smooth_l1p_path))
+filter_rank <- function(q, col, val) {
+  if (is.na(val)) {
+    q %>% filter(is.na({{ col }}))
+  } else {
+    q %>% filter({{ col }} == val)
   }
-
-  calc_group_intensity(spec_list) %>%
-    collect() %>%
-    intensity_to_raster() %>%
-    pipe_save_raster(raw_path) %>%
-    smooth_intensity(w = w) %>%
-    pipe_save_raster(smooth_path) %>%
-    log1p() %>%
-    pipe_save_raster(smooth_l1p_path)
 }
 
-all_species <- taxa_join %>%
-  pull(species)
+walk(seq_len(nrow(groups)), \(i) {
+  k <- groups$kingdom[i]
+  p <- groups$phylum[i]
 
-mammals <- taxa_join %>%
-  filter(class == "Mammalia") %>%
-  pull(species)
+  cc %>%
+    filter_rank(kingdom, k) %>%
+    filter_rank(phylum, p) %>%
+    group_by(kingdom, phylum, species, cell) %>% # drops class/order/genus
+    summarise(n = sum(n)) %>%
+    collect() %>%
+    arrange(species, cell) %>%
+    write_parquet(
+      here::here(out_dir, glue::glue("{safe(k)}__{safe(p)}.parquet")),
+      chunk_size = 50000
+    )
+})
 
-birds <- taxa_join %>%
-  filter(class == "Aves") %>%
-  pull(species)
+species_index <- cc %>%
+  distinct(kingdom, phylum, species) %>%
+  collect() %>%
+  mutate(
+    file = here::here(
+      out_dir,
+      glue::glue("{map_chr(kingdom, safe)}__{map_chr(phylum, safe)}.parquet")
+    )
+  )
 
-plants <- taxa_join %>%
-  filter(kingdom == "Plantae") %>%
-  pull(species)
+write_parquet(
+  species_index,
+  here::here("data", "cellcounts_species_index.parquet")
+)
 
-herps <- taxa_join %>%
-  filter(
-    class == "Reptilia" |
-      class == "Amphibia"
-  ) %>%
-  pull(species)
 
-butterflies <- taxa_join %>%
-  filter(order == "Lepidoptera") %>%
-  pull(species)
+# sampling intensity surfaces for taxonomic groups
+
+
+taxa <- cc %>%
+  distinct(kingdom, class, order, species) %>%
+  collect() %>%
+  filter(!is.na(kingdom))
 
 iter_groups <- list(
-  "all_species" = all_species,
-  "mammals" = mammals,
-  "birds" = birds,
-  "plants" = plants,
-  "reptiles_amphibians" = herps,
-  "butterflies" = butterflies
-)
+  all_species         = taxa,
+  mammals             = filter(taxa, class == "Mammalia"),
+  birds               = filter(taxa, class == "Aves"),
+  plants              = filter(taxa, kingdom == "Plantae"),
+  reptiles_amphibians = filter(taxa, class %in% c("Reptilia", "Amphibia")),
+  butterflies         = filter(taxa, order == "Lepidoptera")
+) %>%
+  map(\(x) distinct(x, kingdom, species))
 
 imap(iter_groups, \(spp, name) {
   calc_smooth_intensity(spp, name)
 })
-
-
-
