@@ -53,8 +53,14 @@ walk(seq_along(c_files), \(n) {
         ((is.na(class) | class != "Aves") & year >= 1970)
     ) %>%
     select(
-      kingdom, phylum, order, class, genus, species,
-      decimallatitude, decimallongitude
+      kingdom,
+      phylum,
+      order,
+      class,
+      genus,
+      species,
+      decimallatitude,
+      decimallongitude
     ) %>%
     collect()
 
@@ -84,7 +90,6 @@ walk(seq_along(c_files), \(n) {
 # 35 is all birds prior to 1982
 # 1494 is some plants prior to 1940
 
-
 # per-phylum sorted files for fast SDM lookups
 
 out_dir <- here::here("data", "cellcounts_by_phylum")
@@ -112,6 +117,11 @@ walk(seq_len(nrow(groups)), \(i) {
   k <- groups$kingdom[i]
   p <- groups$phylum[i]
 
+  savename <- here::here(out_dir, glue::glue("{safe(k)}__{safe(p)}.parquet"))
+  if (file.exists(savename)) {
+    return(savename)
+  }
+
   cc %>%
     filter_rank(kingdom, k) %>%
     filter_rank(phylum, p) %>%
@@ -120,42 +130,69 @@ walk(seq_len(nrow(groups)), \(i) {
     collect() %>%
     arrange(species, cell) %>%
     write_parquet(
-      here::here(out_dir, glue::glue("{safe(k)}__{safe(p)}.parquet")),
+      savename,
       chunk_size = 50000
     )
+
+  savename
 })
 
-species_index <- cc %>%
-  distinct(kingdom, phylum, species) %>%
-  collect() %>%
-  mutate(
-    file = here::here(
-      out_dir,
-      glue::glue("{map_chr(kingdom, safe)}__{map_chr(phylum, safe)}.parquet")
+spec_index_loc <- here::here("data", "cellcounts_species_index.parquet")
+
+if (!file.exists(spec_index_loc)) {
+  species_index <- cc %>%
+    distinct(kingdom, phylum, species) %>%
+    collect() %>%
+    mutate(
+      file = here::here(
+        out_dir,
+        glue::glue("{map_chr(kingdom, safe)}__{map_chr(phylum, safe)}.parquet")
+      )
     )
-  )
 
-write_parquet(
-  species_index,
-  here::here("data", "cellcounts_species_index.parquet")
-)
-
+  write_parquet(species_index, spec_index_loc)
+}
 
 # sampling intensity surfaces for taxonomic groups
 
+# cellcounts has no family column, so join it from spatial_counts (built in 02)
+species_family <- here::here("data", "spatial_counts") %>%
+  open_dataset() %>%
+  distinct(species, family) %>%
+  collect()
 
 taxa <- cc %>%
   distinct(kingdom, class, order, species) %>%
   collect() %>%
-  filter(!is.na(kingdom))
+  filter(!is.na(kingdom)) %>%
+  left_join(species_family, by = "species")
+
+# butterflies = superfamily Papilionoidea
+butterfly_families <- c(
+  "Papilionidae", "Hesperiidae", "Pieridae", "Lycaenidae",
+  "Riodinidae", "Nymphalidae", "Hedylidae"
+)
+
+# stream-sampled (kick-net) orders, kept out of terrestrial invertebrates
+aquatic_insect_orders <- c(
+  "Ephemeroptera", "Plecoptera", "Trichoptera", "Megaloptera"
+)
 
 iter_groups <- list(
-  all_species         = taxa,
-  mammals             = filter(taxa, class == "Mammalia"),
-  birds               = filter(taxa, class == "Aves"),
-  plants              = filter(taxa, kingdom == "Plantae"),
-  reptiles_amphibians = filter(taxa, class %in% c("Reptilia", "Amphibia")),
-  butterflies         = filter(taxa, order == "Lepidoptera")
+  all_species = taxa,
+  mammals = filter(taxa, class == "Mammalia"),
+  birds = filter(taxa, class == "Aves"),
+  plants = filter(taxa, kingdom == "Plantae"),
+  reptiles_amphibians = filter(taxa, class %in% c("Reptilia", "Testudines", "Squamata", "Crocodylia", "Amphibia")),
+  butterflies = filter(taxa, family %in% butterfly_families),
+  invertebrates = filter(
+    taxa,
+    (class == "Insecta" & !order %in% aquatic_insect_orders) |
+      class %in% c("Arachnida", "Diplopoda", "Chilopoda", "Collembola") |
+      order %in% c("Stylommatophora", "Crassiclitellata"), # land snails, earthworms
+    !family %in% butterfly_families
+  ),
+  fungi = filter(taxa, kingdom == "Fungi")
 ) %>%
   map(\(x) distinct(x, kingdom, species))
 
